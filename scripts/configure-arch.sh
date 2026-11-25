@@ -13,7 +13,8 @@ pacman -Sy --noconfirm archlinux-keyring
 pacman -Syu --noconfirm
 
 # 3) 预装 distrobox-init 依赖（目标是首次进容器不联网）
-pacman -S --noconfirm --needed sudo curl lsof xauth
+# 注意：Arch 的包名是 xorg-xauth（提供 xauth 命令），不像 Fedora/Ubuntu 就叫 xauth
+pacman -S --noconfirm --needed sudo curl lsof xorg-xauth
 
 # 4) 自检
 grep -Hn 'tuna' /etc/pacman.d/mirrorlist
