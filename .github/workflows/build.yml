@@ -1,7 +1,7 @@
 name: build-distrobox-images
 
-# 在海外 runner 上拉取 docker.io 基础镜像、换清华源、预装 distrobox-init 依赖，
-# 打成 docker-archive + zstd 离线包并发布到 GitHub Release。
+# 在海外 runner 上拉取 docker.io 基础镜像、换清华源、预装 distrobox-init 依赖、
+# zh_CN locale 与 host-spawn，打成 docker-archive + zstd 离线包并发布到 GitHub Release。
 # 国内下载 Release 资产时可用 gh-proxy 类加速前缀（见 README）。
 
 on:
@@ -49,10 +49,15 @@ jobs:
           # 注意：不能用 --rm —— 容器内做出的修改要保留下来供 commit
           podman run -d --name prep "${{ matrix.image }}" sleep infinity
 
-      - name: Configure mirrors & preinstall distrobox-init deps
+      - name: Configure mirrors, preinstall deps & zh_CN locale
         run: |
           podman cp "scripts/configure-${{ matrix.name }}.sh" prep:/tmp/configure.sh
           podman exec prep bash /tmp/configure.sh
+
+      - name: Install host-spawn
+        run: |
+          podman cp scripts/install-host-spawn.sh prep:/tmp/install-host-spawn.sh
+          podman exec prep bash /tmp/install-host-spawn.sh
 
       - name: "Commit image (fallback: export | import)"
         run: |
@@ -79,10 +84,14 @@ jobs:
           TAG="localhost/distrobox:${{ matrix.name }}"
           zstd -t "${{ matrix.out }}"
           tar -tf "${{ matrix.out }}" | grep -q '^manifest.json$'
-          # 回灌验证：解包 -> load -> 跑一次确认 os-release 与清华源
+          # 回灌验证：解包 -> load -> 跑一次确认 os-release、源配置、locale、时区数据、host-spawn
           zstd -d -c "${{ matrix.out }}" > /tmp/roundtrip.tar
           podman load --input /tmp/roundtrip.tar
           podman run --rm "$TAG" bash -c 'head -2 /etc/os-release'
+          podman run --rm "$TAG" bash -c '
+            locale -a | grep -x "zh_CN.utf8"
+            test -e /usr/share/zoneinfo/Asia/Shanghai
+            timeout 20 /usr/bin/host-spawn --version'
           case "${{ matrix.name }}" in
             arch)
               podman run --rm "$TAG" grep -Hn tuna /etc/pacman.d/mirrorlist ;;
@@ -121,8 +130,8 @@ jobs:
           tag_name: v${{ steps.date.outputs.date }}
           name: distrobox offline images v${{ steps.date.outputs.date }}
           body: |
-            distrobox 离线镜像包（docker-archive + zstd，已预配清华源并预装
-            distrobox-init 依赖，首次进容器无需联网）。
+            distrobox 离线镜像包（docker-archive + zstd）：已预配清华源，
+            预装 distrobox-init 依赖、zh_CN.UTF-8 locale、时区数据与 host-spawn。
 
             | 文件 | 基础镜像 |
             |---|---|
