@@ -14,7 +14,8 @@ pacman -Sy --noconfirm archlinux-keyring
 pacman -Syu --noconfirm
 
 # 3) 预装 distrobox-init 依赖（目标是首次进容器不联网）
-pacman -S --noconfirm --needed sudo curl lsof xauth
+# 注意：Arch 的包名是 xorg-xauth（提供 xauth 命令），不像 Fedora/Ubuntu 就叫 xauth
+pacman -S --noconfirm --needed sudo curl lsof xorg-xauth
 
 # 4) zh_CN.UTF-8 locale
 # Arch 的 glibc-locales 装的是预编译好的 locale 目录（/usr/lib/locale/zh_CN.utf8），
