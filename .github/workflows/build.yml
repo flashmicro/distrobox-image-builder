@@ -1,0 +1,135 @@
+name: build-distrobox-images
+
+# 在海外 runner 上拉取 docker.io 基础镜像、换清华源、预装 distrobox-init 依赖，
+# 打成 docker-archive + zstd 离线包并发布到 GitHub Release。
+# 国内下载 Release 资产时可用 gh-proxy 类加速前缀（见 README）。
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 1 * *" # 每月 1 号 UTC 03:00（北京时间 11:00）重建，保持 :latest 新鲜
+
+concurrency:
+  group: build-distrobox-images
+  cancel-in-progress: false
+
+permissions:
+  contents: write # release job 需要
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: arch
+            image: docker.io/archlinux:latest
+            out: archlinux.tar.zst
+          - name: fedora
+            image: docker.io/fedora:latest
+            out: fedora.tar.zst
+          - name: ubuntu
+            image: docker.io/ubuntu:24.04
+            out: ubuntu.tar.zst
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Ensure podman & zstd
+        run: |
+          command -v podman >/dev/null || { sudo apt-get update && sudo apt-get install -y podman; }
+          command -v zstd >/dev/null || sudo apt-get install -y zstd
+
+      - name: Pull base image
+        run: podman pull "${{ matrix.image }}"
+
+      - name: Prepare container
+        run: |
+          # 注意：不能用 --rm —— 容器内做出的修改要保留下来供 commit
+          podman run -d --name prep "${{ matrix.image }}" sleep infinity
+
+      - name: Configure mirrors & preinstall distrobox-init deps
+        run: |
+          podman cp "scripts/configure-${{ matrix.name }}.sh" prep:/tmp/configure.sh
+          podman exec prep bash /tmp/configure.sh
+
+      - name: "Commit image (fallback: export | import)"
+        run: |
+          set -e
+          TAG="localhost/distrobox:${{ matrix.name }}"
+          # 已知坑：podman load 导入的镜像 + keep-id 容器组合下，commit 可能报
+          # "history lists N non-empty layers, but we have M layers on disk"。
+          # CI 里是 registry 直拉的干净镜像，通常不触发；一旦触发就走 export|import 兜底。
+          if ! podman commit prep "$TAG"; then
+            echo "::warning::podman commit 失败，改用 export|import 管线"
+            podman export prep | podman import - "$TAG"
+          fi
+          podman rm -f prep
+
+      - name: Pack (docker-archive + zstd)
+        run: |
+          podman save --format docker-archive "localhost/distrobox:${{ matrix.name }}" \
+            | zstd -q -c > "${{ matrix.out }}"
+          ls -lh "${{ matrix.out }}"
+
+      - name: Verify package
+        run: |
+          set -e
+          TAG="localhost/distrobox:${{ matrix.name }}"
+          zstd -t "${{ matrix.out }}"
+          tar -tf "${{ matrix.out }}" | grep -q '^manifest.json$'
+          # 回灌验证：解包 -> load -> 跑一次确认 os-release 与清华源
+          zstd -d -c "${{ matrix.out }}" > /tmp/roundtrip.tar
+          podman load --input /tmp/roundtrip.tar
+          podman run --rm "$TAG" bash -c 'head -2 /etc/os-release'
+          case "${{ matrix.name }}" in
+            arch)
+              podman run --rm "$TAG" grep -Hn tuna /etc/pacman.d/mirrorlist ;;
+            fedora)
+              podman run --rm "$TAG" grep -Hn '^baseurl' /usr/share/dnf5/repos.d/fedora.repo ;;
+            ubuntu)
+              podman run --rm "$TAG" grep -Hn '^URIs' /etc/apt/sources.list.d/ubuntu.sources ;;
+          esac
+          rm -f /tmp/roundtrip.tar
+
+      - name: Upload artifact (备份通道)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-package
+          path: ${{ matrix.out }}
+          retention-days: 14
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - id: date
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.date.outputs.date }}
+          name: distrobox offline images v${{ steps.date.outputs.date }}
+          body: |
+            distrobox 离线镜像包（docker-archive + zstd，已预配清华源并预装
+            distrobox-init 依赖，首次进容器无需联网）。
+
+            | 文件 | 基础镜像 |
+            |---|---|
+            | archlinux.tar.zst | docker.io/archlinux:latest |
+            | fedora.tar.zst | docker.io/fedora:latest |
+            | ubuntu.tar.zst | docker.io/ubuntu:24.04 |
+
+            恢复方法见仓库 README。
+          files: dist/*.tar.zst
+          overwrite_files: true
